@@ -1,0 +1,172 @@
+*pi-ide.nvim* pi-ide.nvim
+
+Author:   Louis DeLosSantos <louis.delos@gmail.com>
+Homepage: <https://github.com/ldelossa/pi-ide.nvim>
+License:  MIT license
+
+==============================================================================
+CONTENTS                                                      *pi-ide-contents*
+
+  1   Intro ......................................... |pi-ide-intro|
+  2   Setup ......................................... |pi-ide-setup|
+  3   Commands ...................................... |pi-ide-commands|
+  4   Claude Code Compatibility ..................... |pi-ide-claude-code|
+  5   Tools ......................................... |pi-ide-tools|
+  6   Notifications ................................. |pi-ide-notifications|
+  7   Architecture .................................. |pi-ide-architecture|
+  8   File Layout ................................... |pi-ide-files|
+
+==============================================================================
+INTRODUCTION                                                     *pi-ide-intro*
+
+`pi-ide.nvim` is a Neovim plugin that serves the `pi-ide` protocol over a
+local WebSocket. External AI agents like `pi` and `claude-code` connect to
+the plugin to open diffs in Neovim, read LSP diagnostics, list open buffers,
+and receive cursor and selection notifications.
+
+This is the reference editor implementation for the `pi-ide` Pi extension at
+<https://github.com/ldelossa/pi-ide>. The `pi-ide` extension expects an
+editor that speaks this protocol, and `pi-ide.nvim` implements this in
+Neovim.
+
+The plugin is opinionated about where the agent runs. It assumes `pi` or
+`claude-code` are running as external processes, outside of Neovim. The
+plugin does not embed an agent, does not call out to an LLM, and does not
+hold any prompt state. It only serves editor state to whatever agent
+connects.
+
+==============================================================================
+SETUP                                                            *pi-ide-setup*
+
+Install via your favorite plugin manager.
+
+Using lazy.nvim:
+>
+    {
+        "ldelossa/pi-ide.nvim",
+        config = function()
+            require("pi-ide").setup()
+        end,
+    }
+<
+
+The default configuration is:
+>
+    require("pi-ide").setup({
+        auto_start = true,                 -- start the server on plugin load
+        claude_code_compatibility = false, -- write claude-code lockfile too
+        log_level = "warn",                -- trace, debug, info, warn, error
+    })
+<
+
+==============================================================================
+COMMANDS                                                      *pi-ide-commands*
+
+Three user commands are installed.
+
+                                                                     *:PiStart*
+`:PiStart`              Start the MCP server on a random free port and write
+                        the lockfile.
+
+                                                                      *:PiStop*
+`:PiStop`               Stop the server, close all connected clients, and
+                        reject any open diffs.
+
+                                                                    *:PiStatus*
+`:PiStatus`             Open a floating window showing the server port,
+                        connected client count, and lockfile path.
+
+==============================================================================
+CLAUDE CODE COMPATIBILITY                                  *pi-ide-claude-code*
+
+`pi-ide.nvim` is wire compatible with the `claude-code` IDE integration
+protocol. To enable it, set `claude_code_compatibility = true` in your setup
+call:
+>
+    require("pi-ide").setup({
+        claude_code_compatibility = true,
+    })
+<
+
+When enabled, the plugin writes a second lockfile to
+`~/.claude/ide/<port>.lock` alongside the usual `~/.pi/ide/<port>.lock`, and
+the handshake accepts either the `x-pi-ide-authorization` or
+`x-claude-code-ide-authorization` header. From `claude-code`'s perspective
+the plugin appears as a standard IDE integration and discovery just works.
+
+==============================================================================
+TOOLS                                                            *pi-ide-tools*
+
+Four tools are exposed over the MCP `tools/call` method.
+
+                                                            *pi-ide-openDiff*
+`openDiff`              Open a diff tab between an existing file and proposed
+                        contents. A new tabpage opens with the existing file
+                        on the left and the proposed contents on the right.
+                        Edit the right buffer freely, then save with `:w` to
+                        accept (optionally with your own edits applied), or
+                        close either window to reject. The JSON-RPC response
+                        is held open until the diff resolves.
+
+                                                           *pi-ide-close_tab*
+`close_tab`             Close a previously opened diff tab by name.
+
+                                                      *pi-ide-getDiagnostics*
+`getDiagnostics`        Return LSP diagnostics for a single file (by URI) or
+                        for all loaded buffers if no URI is given.
+
+                                                   *pi-ide-getOpenEditorTabs*
+`getOpenEditorTabs`     List the buffers visible in the current tabpage.
+
+==============================================================================
+NOTIFICATIONS                                            *pi-ide-notifications*
+
+The server pushes a single notification, `selection_changed`, on cursor
+movement, mode change, buffer entry, and text change. The notification is
+debounced at 100ms to avoid flooding the client during rapid editing. The
+payload includes the current file, cursor position, and selected range and
+text if any.
+
+==============================================================================
+ARCHITECTURE                                              *pi-ide-architecture*
+
+`pi-ide.nvim` runs a single MCP server per Neovim instance, listening on a
+random free port on `127.0.0.1`. The server speaks JSON-RPC 2.0 in WebSocket
+text frames using MCP protocol version `2024-11-05`. Only a subset of MCP is
+implemented, specifically the four methods required for the `pi-ide`
+protocol: `initialize`, `notifications/initialized`, `tools/list`, and
+`tools/call`.
+
+On startup the plugin writes a lockfile to `~/.pi/ide/<port>.lock`. Clients
+discover the server by reading lockfiles in this directory and matching the
+`workspaceFolders` field against their `cwd`. A random per-session auth
+token gates access. The token is included in the lockfile and validated on
+every connection.
+
+==============================================================================
+FILE LAYOUT                                                      *pi-ide-files*
+
+>
+    lua/pi-ide/
+        init.lua          -- public API and user commands
+        lockfile.lua      -- auth token generation, lockfile create/remove
+        logger.lua        -- vim.notify wrapper with log levels
+        selection.lua     -- cursor and selection tracking
+        diff.lua          -- diff tab lifecycle and coroutine accept/reject
+        tools.lua         -- MCP tool definitions and dispatch
+        server/
+            init.lua      -- JSON-RPC dispatch and deferred response routing
+            tcp.lua       -- libuv accept loop, client registry, ping timer
+            client.lua    -- per-client state and WebSocket frame loop
+            frame.lua     -- WebSocket frame parse and emit
+            handshake.lua -- HTTP Upgrade handling and auth header check
+            utils.lua     -- base64, SHA-1, UTF-8, byte packing, XOR mask
+<
+
+The WebSocket implementation under `server/` is roughly 1200 lines of pure
+Lua. It exists because Neovim ships no WebSocket library and the Lua
+ecosystem has no de facto standard. If you ever swap the transport,
+`frame.lua`, `handshake.lua`, and most of `utils.lua` go away.
+
+==============================================================================
+vim:tw=78:ts=4:sw=4:et:ft=help:norl:
