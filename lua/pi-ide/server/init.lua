@@ -8,7 +8,15 @@ local MCP_PROTOCOL_VERSION = "2024-11-05"
 local SERVER_NAME = "pi-ide-neovim"
 local SERVER_VERSION = "0.1.0"
 
-M.state = { server = nil, port = nil, ping_timer = nil, auth_token = nil, handlers = nil }
+M.state = {
+	server = nil,
+	port = nil,
+	ping_timer = nil,
+	auth_token = nil,
+	handlers = nil,
+	outbound = {},
+	next_outbound_id = 0,
+}
 
 local function register_handlers()
 	M.state.handlers = {
@@ -46,6 +54,14 @@ function M.start(opts)
 		on_connect = function(client) logger.debug("server", "client connected:", client.id) end,
 		on_disconnect = function(client, code, reason)
 			logger.debug("server", "client disconnected:", client.id, "(code:", code, ", reason:", reason or "N/A", ")")
+			for id, entry in pairs(M.state.outbound) do
+				if entry.client_id == client.id then
+					M.state.outbound[id] = nil
+					vim.schedule(function()
+						pcall(entry.callback, { code = -32000, message = "Client disconnected" }, nil)
+					end)
+				end
+			end
 		end,
 		on_error = function(error_msg) logger.error("server", "server error:", error_msg) end,
 	}
@@ -69,6 +85,10 @@ function M.stop()
 	end
 	tcp_server.stop_server(M.state.server)
 	_G.pi_ide_deferred_responses = {}
+	for id, entry in pairs(M.state.outbound) do
+		pcall(entry.callback, { code = -32000, message = "Server stopped" }, nil)
+		M.state.outbound[id] = nil
+	end
 	M.state.server = nil
 	M.state.port = nil
 	M.state.auth_token = nil
@@ -87,7 +107,23 @@ function M._handle_message(client, message)
 		})
 		return
 	end
+	if parsed.id ~= nil and parsed.method == nil then
+		M._handle_response(parsed)
+		return
+	end
 	if parsed.id then M._handle_request(client, parsed) else M._handle_notification(client, parsed) end
+end
+
+function M._handle_response(response)
+	local id = response.id
+	local entry = M.state.outbound[id]
+	if not entry then return end
+	M.state.outbound[id] = nil
+	if response.error then
+		pcall(entry.callback, response.error, nil)
+	else
+		pcall(entry.callback, nil, response.result)
+	end
 end
 
 function M._handle_request(client, request)
@@ -156,6 +192,55 @@ function M.broadcast(method, params)
 	local message = { jsonrpc = "2.0", method = method, params = params or vim.empty_dict() }
 	tcp_server.broadcast(M.state.server, vim.json.encode(message))
 	return true
+end
+
+function M.first_client()
+	if not M.state.server then return nil end
+	for _, c in pairs(M.state.server.clients) do
+		if c.state == "connected" then return c end
+	end
+	return nil
+end
+
+function M.request_client(client, method, params, callback)
+	if not M.state.server then
+		callback({ code = -32000, message = "Server not running" }, nil)
+		return nil
+	end
+	if not client then
+		callback({ code = -32000, message = "No connected client" }, nil)
+		return nil
+	end
+	M.state.next_outbound_id = M.state.next_outbound_id + 1
+	local id = "out_" .. tostring(M.state.next_outbound_id)
+	M.state.outbound[id] = { callback = callback, client_id = client.id }
+	local payload = vim.json.encode({
+		jsonrpc = "2.0",
+		id = id,
+		method = method,
+		params = params or vim.empty_dict(),
+	})
+	tcp_server.send_to_client(M.state.server, client.id, payload, function(err)
+		if err and M.state.outbound[id] then
+			M.state.outbound[id] = nil
+			vim.schedule(function() pcall(callback, { code = -32000, message = "Send failed: " .. tostring(err) }, nil) end)
+		end
+	end)
+	return id
+end
+
+function M.cancel_request(id)
+	local entry = M.state.outbound[id]
+	if not entry then return end
+	M.state.outbound[id] = nil
+	if M.state.server then
+		local client = M.state.server.clients[entry.client_id]
+		if client then
+			local msg = { jsonrpc = "2.0", method = "request_cancelled", params = { id = id } }
+			tcp_server.send_to_client(M.state.server, client.id, vim.json.encode(msg))
+		end
+	end
+	pcall(entry.callback, { code = -32800, message = "Request cancelled" }, nil)
 end
 
 function M.get_status()
