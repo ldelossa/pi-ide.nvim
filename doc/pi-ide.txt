@@ -71,7 +71,7 @@ The default configuration is:
 ==============================================================================
 COMMANDS                                                      *pi-ide-commands*
 
-Five user commands are installed.
+Six user commands are installed.
 
                                                                      *:PiStart*
 `:PiStart`              Start the MCP server on a random free port and write
@@ -95,6 +95,11 @@ Five user commands are installed.
 `:PiSuggestToggle`      Toggle automatic (debounced) suggestion triggering on
                         or off for the current session. The manual command
                         keeps working when auto is off.
+
+                                                                *:PiSuggestModel*
+`:PiSuggestModel`       Ask the connected `pi-ide` extension for available
+                        models and select the runtime suggestion model for
+                        this Neovim session.
 
 ==============================================================================
 CLAUDE CODE COMPATIBILITY                                  *pi-ide-claude-code*
@@ -155,9 +160,11 @@ through the `pi-ide` Pi extension. The editor initiates the request; the
 extension calls an LLM and returns up to three alternatives; Neovim renders
 them as virtual text and handles cycling and partial acceptance.
 
-Both an active LSP client and a treesitter parser for the buffer are hard
-requirements. If either is missing the feature self-disables for that buffer
-with a one-time notification.
+Suggestions always work regardless of editor setup. For the best
+results, make sure both an LSP client and a treesitter parser are active
+for the buffer — they provide structural and diagnostic context that
+improves completion quality. When either is missing, the feature still
+works but with reduced context.
 
 Setup options under `suggestion` are passed through to the suggestion
 module:
@@ -174,6 +181,17 @@ Model precedence: the `pi` CLI flag `--pi-ide-suggestion-model
 <provider>/<id>` wins. Otherwise the editor-provided `model` setup option
 is sent in the request and used. If neither is set, the current session's
 model is used.
+
+To find valid `provider/id` strings, run `pi --list-models` and join the
+`provider` and `model` columns with a `/` (e.g., `openai/gpt-4o`). You can
+also run |:PiSuggestModel| while connected to pi to pick an available model
+for the current Neovim session. If pi was started with
+`--pi-ide-suggestion-model`, that CLI override still wins.
+
+For suggestions, prefer low-latency models. Large reasoning models often
+feel too slow for inline completion; smaller coding-capable models such as
+`openai-codex/gpt-5.4-mini` or `deepseek/deepseek-v4-flash` usually provide
+a better interactive experience.
 
 Default insert-mode keys (set `default_keys = false` to skip):
 
@@ -218,8 +236,8 @@ ARCHITECTURE                                              *pi-ide-architecture*
 random free port on `127.0.0.1`. The server speaks JSON-RPC 2.0 in WebSocket
 text frames using MCP protocol version `2024-11-05`. Tool calls flow from
 the connected agent into Neovim; the plugin also initiates its own requests
-(currently only `getSuggestions`) back to the agent for the inline
-suggestion feature.
+(`getSuggestions` and `listSuggestionModels`) back to the agent for the
+inline suggestion feature.
 
 On startup the plugin writes a lockfile to `~/.pi/ide/<port>.lock`. Clients
 discover the server by reading lockfiles in this directory and matching the

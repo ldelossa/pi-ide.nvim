@@ -167,6 +167,64 @@ function M.cursor_region(bufnr, row, col)
 	return before, after
 end
 
+local function pattern_escape(text)
+	return text:gsub("([^%w])", "%%%1")
+end
+
+local function capture_is_comment(capture)
+	if type(capture) == "string" then return capture:find("comment") ~= nil end
+	if type(capture) ~= "table" then return false end
+	local name = capture.capture or capture.name
+	return type(name) == "string" and name:find("comment") ~= nil
+end
+
+local function cursor_in_comment_from_treesitter_captures(bufnr, row, col)
+	if not vim.treesitter.get_captures_at_pos then return false end
+	for _, check_col in ipairs({ col, math.max(0, col - 1) }) do
+		local ok, captures = pcall(vim.treesitter.get_captures_at_pos, bufnr, row, check_col)
+		if ok and captures then
+			for _, capture in ipairs(captures) do
+				if capture_is_comment(capture) then return true end
+			end
+		end
+	end
+	return false
+end
+
+local function cursor_in_comment_from_treesitter_nodes(bufnr, row, col)
+	local lang = ts_lang(bufnr)
+	if not lang then return false end
+	local parser = get_parser(bufnr, lang)
+	if not parser then return false end
+	local tree = parser:parse()[1]
+	if not tree then return false end
+	for _, check_col in ipairs({ col, math.max(0, col - 1) }) do
+		local node = tree:root():named_descendant_for_range(row, check_col, row, check_col)
+		while node do
+			if node:type():find("comment") then return true end
+			node = node:parent()
+		end
+	end
+	return false
+end
+
+local function cursor_in_comment_from_commentstring(bufnr, row, col)
+	local commentstring = vim.bo[bufnr].commentstring or ""
+	local marker_start, marker_end = commentstring:find("%%s")
+	if not marker_start then return false end
+	local prefix = commentstring:sub(1, marker_start - 1):gsub("%s+$", "")
+	if prefix == "" then return false end
+	local line = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ""
+	local before = line:sub(1, col)
+	return before:match("^%s*" .. pattern_escape(prefix)) ~= nil
+end
+
+function M.is_cursor_in_comment(bufnr, row, col)
+	return cursor_in_comment_from_treesitter_captures(bufnr, row, col)
+		or cursor_in_comment_from_treesitter_nodes(bufnr, row, col)
+		or cursor_in_comment_from_commentstring(bufnr, row, col)
+end
+
 function M.gather(bufnr, row, col, opts)
 	opts = opts or {}
 	local outline = M.outline(bufnr)
@@ -180,6 +238,7 @@ function M.gather(bufnr, row, col, opts)
 		cursorBefore = before,
 		cursorAfter = after,
 		suggestionCount = 3,
+		cursorInComment = M.is_cursor_in_comment(bufnr, row, col),
 	}
 	if opts.model and opts.model ~= "" then params.model = opts.model end
 	return params

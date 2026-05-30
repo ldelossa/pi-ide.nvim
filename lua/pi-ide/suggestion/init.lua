@@ -13,7 +13,6 @@ local state = {
 	enabled = true,
 	augroup = nil,
 	timer = nil,
-	notified_disabled = false,
 	notified_request_failed = false,
 	session = nil,
 	suppressing = false,
@@ -192,21 +191,6 @@ end
 
 local function start_session(bufnr, anchor_row, anchor_col, manual)
 	dismiss()
-	if not context.has_treesitter(bufnr) then
-		if manual or not state.notified_disabled then
-			notify("pi-ide suggestion: no treesitter parser for this buffer", vim.log.levels.WARN)
-			state.notified_disabled = true
-		end
-		return
-	end
-	if not context.has_lsp(bufnr) then
-		if manual or not state.notified_disabled then
-			notify("pi-ide suggestion: no LSP client for this buffer", vim.log.levels.WARN)
-			state.notified_disabled = true
-		end
-		return
-	end
-	state.notified_disabled = false
 	local client = state.server and state.server.first_client() or nil
 	if not client then
 		-- Silent on auto-trigger: this is a transient startup race that
@@ -320,6 +304,44 @@ end
 function M.toggle()
 	state.enabled = not state.enabled
 	notify("pi-ide auto suggestions: " .. (state.enabled and "on" or "off"))
+end
+
+function M.select_model()
+	local client = state.server and state.server.first_client() or nil
+	if not client then
+		notify("pi-ide suggestion: no extension client connected (run /ide in pi)", vim.log.levels.WARN)
+		return
+	end
+	state.server.request_client(client, "listSuggestionModels", {}, function(err, result)
+		vim.schedule(function()
+			if err then
+				notify("pi-ide suggestion: model list failed (" .. (err.message or "?") .. ")", vim.log.levels.WARN)
+				return
+			end
+			local models = (result and result.models) or {}
+			if #models == 0 then
+				notify("pi-ide suggestion: no available models returned", vim.log.levels.WARN)
+				return
+			end
+			local cli_override = result and result.cliOverride
+			if cli_override and cli_override ~= "" then
+				notify("pi-ide suggestion: CLI model override active (" .. cli_override .. "); editor selection will not take effect", vim.log.levels.WARN)
+			end
+			vim.ui.select(models, {
+				prompt = "Pi suggestion model",
+				format_item = function(item)
+					local label = item.model or ((item.provider or "?") .. "/" .. (item.id or "?"))
+					if item.name and item.name ~= item.id then label = label .. " · " .. item.name end
+					if state.model == item.model then label = label .. " · current" end
+					return label
+				end,
+			}, function(item)
+				if not item then return end
+				state.model = item.model
+				notify("pi-ide suggestion model: " .. state.model)
+			end)
+		end)
+	end)
 end
 
 local function cycle_in_direction(delta)
