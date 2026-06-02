@@ -97,6 +97,11 @@ function M.setup(server)
 	)
 end
 
+--- Return the last known selection state, or nil if none.
+function M.get_current()
+	return state.latest
+end
+
 function M.disable()
 	if not state.enabled then return end
 	cancel_timer()

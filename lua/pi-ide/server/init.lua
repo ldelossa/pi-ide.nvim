@@ -51,7 +51,17 @@ function M.start(opts)
 	}
 	local callbacks = {
 		on_message = function(client, message) M._handle_message(client, message) end,
-		on_connect = function(client) logger.debug("server", "client connected:", client.id) end,
+		on_connect = function(client)
+			logger.debug("server", "client connected:", client.id)
+			-- Push current selection state to the newly connected client so the
+			-- pi extension can restore editor context immediately without waiting
+			-- for the user to move the cursor.
+			local selection = require("pi-ide.selection")
+			local current = selection.get_current()
+			if current then
+				M.send_notification(client, "selection_changed", current)
+			end
+		end,
 		on_disconnect = function(client, code, reason)
 			logger.debug("server", "client disconnected:", client.id, "(code:", code, ", reason:", reason or "N/A", ")")
 			for id, entry in pairs(M.state.outbound) do
@@ -184,6 +194,18 @@ function M.send_response(client, id, result, error_data)
 	local response = { jsonrpc = "2.0", id = id }
 	if error_data then response.error = error_data else response.result = result end
 	tcp_server.send_to_client(M.state.server, client.id, vim.json.encode(response))
+	return true
+end
+
+---Send a JSON-RPC notification to a single client (no id).
+---@param client WebSocketClient The target client
+---@param method string Method name
+---@param params table|nil Parameters
+---@return boolean success
+function M.send_notification(client, method, params)
+	if not M.state.server then return false end
+	local message = { jsonrpc = "2.0", method = method, params = params or vim.empty_dict() }
+	tcp_server.send_to_client(M.state.server, client.id, vim.json.encode(message))
 	return true
 end
 
