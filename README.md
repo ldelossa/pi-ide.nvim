@@ -83,9 +83,8 @@ diffs.
 `PiStatus` - Open a floating window showing the server port, connected client
 count, and lockfile path.
 
-`PiSuggest` - Manually trigger an inline suggestion at the cursor. Requires
-a connected `pi-ide` extension client, an active LSP client, and a treesitter
-parser for the current buffer.
+`PiSuggest` - Manually trigger an inline suggestion at the cursor. Requires a
+connected `pi-ide` extension client; treesitter context is used when available.
 
 `PiSuggestToggle` - Toggle automatic (debounced) suggestion triggering on or
 off for the current session.
@@ -96,17 +95,15 @@ and select the runtime suggestion model for this Neovim session.
 ## Suggestions
 
 Inline ghost-text suggestions routed through the `pi-ide` extension. Neovim
-gathers a window of lines around the cursor and, when available, a
-treesitter-derived structural outline and the enclosing function or class;
-sends the bundle to the connected `pi-ide` extension; renders the returned
-alternatives as ghost text; and lets the user cycle and accept by word,
-line, or full suggestion.
+gathers a window of lines around the cursor and, when available, a compact
+treesitter-derived declaration outline plus the enclosing scope chain; sends
+the bundle to the connected `pi-ide` extension; renders the returned
+alternatives as ghost text; and lets the user cycle and accept by word, line,
+or full suggestion.
 
-Suggestions always work regardless of editor setup. For the best results,
-make sure both an LSP client and a treesitter parser are active for the
-buffer — they provide structural and diagnostic context that improves
-completion quality. When either is missing, the feature still works but
-with reduced context.
+Suggestions work without a treesitter parser, using cursor-local context only.
+When treesitter is available, the declaration outline prioritizes symbols near
+the cursor and omits function-body implementation details.
 
 ### Model selection
 
@@ -147,11 +144,16 @@ on the current window, or when the current line is wide enough to wrap inside
 the window. Auto-triggers skip silently; manual `:PiSuggest` emits a warning
 so you know why nothing appeared.
 
-Session lifecycle: once a suggestion arrives, typing characters that match
-the suggestion advances the ghost text without firing a new LLM call.
-Partial acceptance preserves the remaining tail of the suggestion as a new
-ghost-text session, so a single LLM call can drive multiple word- or
-line-sized accepts.
+Session lifecycle: matching characters typed while a request is in flight are
+reconciled when its response arrives. Once a suggestion is visible, matching
+typing advances the ghost text without firing a new LLM call. Explicit cursor
+navigation cancels the request or visible suggestion. Partial acceptance
+preserves the remaining tail as a new ghost-text session, so a single LLM call
+can drive multiple word- or line-sized accepts.
+
+Completion scope is hybrid: mid-token and mid-statement suggestions stay
+concise, while structural boundaries and descriptive implementation comments
+may produce a small coherent multi-line insertion.
 
 ## Architecture
 
@@ -198,3 +200,14 @@ proposed contents on the right. Edit the right buffer freely, then save with
 `:w` to accept the change (optionally with your own edits applied), or close
 either window to reject. The plugin tears down the tabpage after the diff
 resolves.
+
+## Development
+
+Run the headless suggestion regression suite from the repository root:
+
+```bash
+nvim --headless -u NONE -c 'luafile tests/suggestion_spec.lua'
+```
+
+It covers semantic context budgeting, exact multiline rendering, active and
+in-flight typing-through, and explicit cursor cancellation.

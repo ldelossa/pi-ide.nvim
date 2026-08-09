@@ -2,11 +2,25 @@ local M = {}
 
 local BEFORE_LINES = 20
 local AFTER_LINES = 10
--- Hard cap on the serialized treesitter outline. The full sexpr of a large
--- file can run several thousand tokens; truncate to keep the request cheap.
-local MAX_OUTLINE_CHARS = 12000
+local MAX_OUTLINE_CHARS = 6000
+local MAX_SIGNATURE_CHARS = 240
+local OUTLINE_NEARBY_LINES = 200
 
 local outline_cache = {}
+
+local FUNCTION_NODE_TYPES = {
+	function_declaration = true,
+	function_definition = true,
+	function_item = true,
+	method_declaration = true,
+	method_definition = true,
+	constructor_declaration = true,
+	arrow_function = true,
+	local_function = true,
+	function_expression = true,
+	method = true,
+	singleton_method = true,
+}
 
 local SCOPE_NODE_TYPES = {
 	function_declaration = true,
@@ -14,6 +28,7 @@ local SCOPE_NODE_TYPES = {
 	function_item = true,
 	method_declaration = true,
 	method_definition = true,
+	constructor_declaration = true,
 	arrow_function = true,
 	local_function = true,
 	function_expression = true,
@@ -22,10 +37,59 @@ local SCOPE_NODE_TYPES = {
 	class_item = true,
 	struct_declaration = true,
 	struct_item = true,
+	record_declaration = true,
 	type_declaration = true,
 	type_alias_declaration = true,
 	interface_declaration = true,
+	annotation_type_declaration = true,
+	enum_declaration = true,
+	enum_item = true,
+	struct_specifier = true,
+	class_specifier = true,
+	enum_specifier = true,
+	union_specifier = true,
+	type_definition = true,
+	alias_declaration = true,
+	template_declaration = true,
+	concept_definition = true,
+	trait_declaration = true,
+	trait_item = true,
 	impl_item = true,
+	module_declaration = true,
+	namespace_declaration = true,
+	namespace_definition = true,
+	object_declaration = true,
+	method = true,
+	singleton_method = true,
+	class = true,
+	module = true,
+}
+
+local OUTLINE_NODE_TYPES = {}
+for node_type in pairs(SCOPE_NODE_TYPES) do OUTLINE_NODE_TYPES[node_type] = true end
+
+-- These declarations are useful at module/class scope but become noise inside
+-- function bodies. Function signatures are retained while their bodies are
+-- intentionally skipped.
+local TOP_LEVEL_OUTLINE_NODE_TYPES = {
+	import_statement = true,
+	import_declaration = true,
+	import_from_statement = true,
+	future_import_statement = true,
+	use_declaration = true,
+	preproc_include = true,
+	preproc_def = true,
+	preproc_function_def = true,
+	declaration = true,
+	lexical_declaration = true,
+	variable_declaration = true,
+	var_declaration = true,
+	const_declaration = true,
+	constant_declaration = true,
+	const_item = true,
+	static_item = true,
+	field_declaration = true,
+	property_declaration = true,
 }
 
 local function ts_lang(bufnr)
@@ -53,75 +117,121 @@ function M.has_lsp(bufnr)
 	return #clients > 0
 end
 
--- Serialize the parsed tree as an indented sexpr-ish outline. Named nodes
--- only; leaf named nodes are followed by their source text in quotes so the
--- LLM sees identifier names alongside structure.
-local function serialize_tree(root, bufnr)
-	local buf = {}
-	local total = 0
-	local truncated = false
-	local open_depth = 0
-	local function emit(text)
-		if truncated then return end
-		if total + #text > MAX_OUTLINE_CHARS then
-			buf[#buf + 1] = "\n... <truncated>\n"
-			for d = open_depth - 1, 0, -1 do
-				buf[#buf + 1] = string.rep("  ", d) .. ")\n"
-			end
-			truncated = true
-			return
-		end
-		buf[#buf + 1] = text
-		total = total + #text
+local function truncate_utf8(text, max_bytes)
+	if #text <= max_bytes then return text end
+	local ellipsis = "…"
+	local cut = math.max(0, max_bytes - #ellipsis)
+	while cut > 0 do
+		local next_byte = text:byte(cut + 1)
+		if not next_byte or next_byte < 0x80 or next_byte >= 0xC0 then break end
+		cut = cut - 1
 	end
-	local function walk(node, depth)
-		if truncated then return end
-		local indent = string.rep("  ", depth)
-		local has_named_child = false
-		for child in node:iter_children() do
-			if child:named() then has_named_child = true; break end
-		end
-		if not has_named_child then
-			local text = vim.treesitter.get_node_text(node, bufnr) or ""
-			text = text:gsub("\n.*", "")
-			if #text > 80 then text = text:sub(1, 80) .. "…" end
-			emit(indent .. "(" .. node:type() .. " " .. string.format("%q", text) .. ")\n")
-			return
-		end
-		emit(indent .. "(" .. node:type() .. "\n")
-		open_depth = open_depth + 1
-		for child in node:iter_children() do
-			if child:named() then walk(child, depth + 1) end
-		end
-		emit(indent .. ")\n")
-		open_depth = open_depth - 1
-	end
-	walk(root, 0)
-	return table.concat(buf)
+	return text:sub(1, cut) .. ellipsis
 end
 
-function M.outline(bufnr)
+local function declaration_signature(node, bufnr)
+	local text = vim.treesitter.get_node_text(node, bufnr) or ""
+	text = text:match("([^\r\n]*)") or ""
+	text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
+	if text == "" then text = node:type() end
+	return truncate_utf8(text, MAX_SIGNATURE_CHARS)
+end
+
+local function collect_outline_entries(root, bufnr)
+	local entries = {}
+	local seen = {}
+	local function walk(node, outline_depth, inside_function)
+		local node_type = node:type()
+		local include = OUTLINE_NODE_TYPES[node_type]
+			or (TOP_LEVEL_OUTLINE_NODE_TYPES[node_type] and not inside_function)
+		local next_depth = outline_depth
+		if include then
+			local start_row = node:range()
+			local signature = declaration_signature(node, bufnr)
+			local key = string.format("%d:%d:%s", start_row, outline_depth, signature)
+			if not seen[key] then
+				seen[key] = true
+				entries[#entries + 1] = {
+					line = start_row + 1,
+					depth = outline_depth,
+					text = signature,
+				}
+			end
+			next_depth = outline_depth + 1
+		end
+		-- Function bodies and value initializers dominate syntax trees but add no
+		-- declaration-level context. Their signatures already carry the useful
+		-- symbol information, so avoid traversing implementation nodes.
+		if FUNCTION_NODE_TYPES[node_type] or TOP_LEVEL_OUTLINE_NODE_TYPES[node_type] then return end
+		local child_inside_function = inside_function or FUNCTION_NODE_TYPES[node_type] == true
+		for child in node:iter_children() do
+			if child:named() then walk(child, next_depth, child_inside_function) end
+		end
+	end
+	walk(root, 0, false)
+	table.sort(entries, function(a, b)
+		if a.line == b.line then return a.depth < b.depth end
+		return a.line < b.line
+	end)
+	return entries
+end
+
+local function format_outline_entry(entry)
+	return string.rep("  ", entry.depth) .. string.format("L%d %s\n", entry.line, entry.text)
+end
+
+local function render_outline(entries, cursor_row)
+	local rendered = {}
+	local total = 0
+	for i, entry in ipairs(entries) do
+		local text = format_outline_entry(entry)
+		rendered[i] = text
+		total = total + #text
+	end
+	if total <= MAX_OUTLINE_CHARS then return table.concat(rendered) end
+
+	local cursor_line = (cursor_row or 0) + 1
+	local candidates = {}
+	for i, entry in ipairs(entries) do
+		local distance = math.abs(entry.line - cursor_line)
+		local priority = distance <= OUTLINE_NEARBY_LINES and 0 or (entry.depth == 0 and 1 or 2)
+		candidates[#candidates + 1] = { index = i, priority = priority, distance = distance, line = entry.line }
+	end
+	table.sort(candidates, function(a, b)
+		if a.priority ~= b.priority then return a.priority < b.priority end
+		if a.distance ~= b.distance then return a.distance < b.distance end
+		return a.line < b.line
+	end)
+
+	local header = string.format("... semantic outline truncated; declarations nearest line %d prioritized ...\n", cursor_line)
+	local selected = {}
+	total = #header
+	for _, candidate in ipairs(candidates) do
+		local text = rendered[candidate.index]
+		if total + #text <= MAX_OUTLINE_CHARS then
+			selected[candidate.index] = true
+			total = total + #text
+		end
+	end
+
+	local out = { header }
+	for i, text in ipairs(rendered) do
+		if selected[i] then out[#out + 1] = text end
+	end
+	return table.concat(out)
+end
+
+function M.outline(bufnr, cursor_row)
 	local tick = vim.b[bufnr].changedtick or 0
 	local cached = outline_cache[bufnr]
-	if cached and cached.tick == tick then return cached.text end
-	local lang = ts_lang(bufnr)
-	if not lang then
-		outline_cache[bufnr] = { tick = tick, text = "" }
-		return ""
+	if not cached or cached.tick ~= tick then
+		local lang = ts_lang(bufnr)
+		local parser = lang and get_parser(bufnr, lang) or nil
+		local tree = parser and parser:parse()[1] or nil
+		cached = { tick = tick, entries = tree and collect_outline_entries(tree:root(), bufnr) or {} }
+		outline_cache[bufnr] = cached
 	end
-	local parser = get_parser(bufnr, lang)
-	if not parser then
-		outline_cache[bufnr] = { tick = tick, text = "" }
-		return ""
-	end
-	local tree = parser:parse()[1]
-	if not tree then
-		outline_cache[bufnr] = { tick = tick, text = "" }
-		return ""
-	end
-	local text = serialize_tree(tree:root(), bufnr)
-	outline_cache[bufnr] = { tick = tick, text = text }
-	return text
+	return render_outline(cached.entries, cursor_row)
 end
 
 function M.enclosing_scope(bufnr, row)
@@ -227,7 +337,7 @@ end
 
 function M.gather(bufnr, row, col, opts)
 	opts = opts or {}
-	local outline = M.outline(bufnr)
+	local outline = M.outline(bufnr, row)
 	local enclosing = M.enclosing_scope(bufnr, row)
 	local before, after = M.cursor_region(bufnr, row, col)
 	local params = {

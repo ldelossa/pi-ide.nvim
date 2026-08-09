@@ -87,9 +87,8 @@ Six user commands are installed.
 
                                                                    *:PiSuggest*
 `:PiSuggest`            Manually trigger an inline suggestion at the cursor.
-                        Requires a connected `pi-ide` extension client and an
-                        active LSP plus treesitter parser for the current
-                        buffer.
+                        Requires a connected `pi-ide` extension client;
+                        treesitter context is used when available.
 
                                                              *:PiSuggestToggle*
 `:PiSuggestToggle`      Toggle automatic (debounced) suggestion triggering on
@@ -160,11 +159,10 @@ through the `pi-ide` Pi extension. The editor initiates the request; the
 extension calls an LLM and returns up to three alternatives; Neovim renders
 them as virtual text and handles cycling and partial acceptance.
 
-Suggestions always work regardless of editor setup. For the best
-results, make sure both an LSP client and a treesitter parser are active
-for the buffer — they provide structural and diagnostic context that
-improves completion quality. When either is missing, the feature still
-works but with reduced context.
+Suggestions work without a treesitter parser, using cursor-local context
+only. When treesitter is available, pi-ide.nvim adds a compact declaration
+outline that prioritizes symbols near the cursor and omits function-body
+implementation details.
 
 Setup options under `suggestion` are passed through to the suggestion
 module:
@@ -221,13 +219,18 @@ virt_text would render in the wrong screen position — specifically when
 wide enough to wrap inside the window. Auto-triggers skip silently;
 manual `:PiSuggest` emits a warning so you know why nothing appeared.
 
-Session lifecycle: once a suggestion arrives, typing characters that match
-the suggestion advances the ghost text without firing a new LLM call.
-Typing a character that diverges first tries to cycle to an alternative
-whose prefix matches; if none match, the session is dismissed and the next
-debounce will fire a fresh request. Partial acceptance preserves the
-remaining tail of the suggestion as a new ghost-text session, so a single
-LLM call can drive multiple word- or line-sized accepts.
+Session lifecycle: matching characters typed while a request is in flight
+are reconciled when its response arrives. Once a suggestion is visible,
+matching typing advances the ghost text without firing a new LLM call.
+Explicit cursor navigation cancels the request or visible suggestion. Typing
+a character that diverges first tries an alternative whose prefix matches;
+if none matches, the session is dismissed. Partial acceptance preserves the
+remaining tail as a new ghost-text session, so a single LLM call can drive
+multiple word- or line-sized accepts.
+
+Completion scope is hybrid: mid-token and mid-statement suggestions stay
+concise, while structural boundaries and descriptive implementation comments
+may produce a small coherent multi-line insertion.
 
 ==============================================================================
 ARCHITECTURE                                              *pi-ide-architecture*

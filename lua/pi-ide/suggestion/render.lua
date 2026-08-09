@@ -19,8 +19,8 @@ end
 function M.show(bufnr, row, col, text, index, total)
 	M.clear(bufnr)
 	if not text or text == "" then return end
-	text = text:gsub("^\n+", "")
-	if text == "" then return end
+	-- Leading newlines are meaningful insertion text for hybrid multi-line
+	-- completions. Keep them so rendered ghost text matches accepted text.
 	local lines = vim.split(text, "\n", { plain = true })
 	local indicator = (total and total > 1)
 		and { string.format(" [%d/%d]", index, total), INDICATOR_HIGHLIGHT }

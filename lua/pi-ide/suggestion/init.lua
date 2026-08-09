@@ -155,14 +155,20 @@ end
 local function reconcile(bufnr)
 	if not state.session or state.session.bufnr ~= bufnr then return end
 	local s = state.session
-	-- Response not back yet: the start_session callback will reconcile any
-	-- chars typed during the in-flight window when it runs.
-	if #s.suggestions == 0 then return end
 	local cur = vim.api.nvim_win_get_cursor(0)
 	local cur_row = cur[1] - 1
 	local cur_col = cur[2]
 	if cur_row < s.anchor_row or (cur_row == s.anchor_row and cur_col < s.anchor_col) then
 		dismiss()
+		return
+	end
+	if #s.suggestions == 0 then
+		-- Preserve the request-origin anchor for response reconciliation, but
+		-- remember where the most recent text edit left the cursor. The deferred
+		-- CursorMovedI handler uses this to distinguish typing from navigation.
+		s.pending_edit_row = cur_row
+		s.pending_edit_col = cur_col
+		s.pending_edit_tick = vim.b[bufnr].changedtick or 0
 		return
 	end
 	if cur_row == s.anchor_row and cur_col == s.anchor_col then
@@ -217,14 +223,20 @@ local function start_session(bufnr, anchor_row, anchor_col, manual)
 		end
 	end
 	local params = context.gather(bufnr, anchor_row, anchor_col, { model = state.model })
+	local anchor_line = vim.api.nvim_buf_get_lines(bufnr, anchor_row, anchor_row + 1, false)[1] or ""
 	local session = {
 		bufnr = bufnr,
 		anchor_row = anchor_row,
 		anchor_col = anchor_col,
+		same_line_suffix = anchor_line:sub(anchor_col + 1),
 		suggestions = {},
 		index = 1,
 		consumed = 0,
 		request_id = nil,
+		request_changedtick = vim.b[bufnr].changedtick or 0,
+		pending_edit_row = nil,
+		pending_edit_col = nil,
+		pending_edit_tick = nil,
 		manual = manual or false,
 	}
 	state.session = session
@@ -247,7 +259,16 @@ local function start_session(bufnr, anchor_row, anchor_col, manual)
 				return
 			end
 			state.notified_request_failed = false
-			local sugs = (result and result.suggestions) or {}
+			local sugs = {}
+			local raw_suggestions = result and type(result.suggestions) == "table" and result.suggestions or {}
+			for _, suggestion in ipairs(raw_suggestions) do
+				local relocates_visible_suffix = type(suggestion) == "string"
+					and suggestion:find("\n", 1, true) ~= nil
+					and session.same_line_suffix:find("%S") ~= nil
+				if type(suggestion) == "string" and suggestion ~= "" and not relocates_visible_suffix then
+					sugs[#sugs + 1] = suggestion
+				end
+			end
 			if #sugs == 0 then
 				state.session = nil
 				if session.manual then notify("pi-ide suggestion: no completions returned") end
@@ -264,6 +285,13 @@ local function start_session(bufnr, anchor_row, anchor_col, manual)
 			end
 			if cur_row < session.anchor_row or (cur_row == session.anchor_row and cur_col < session.anchor_col) then
 				if session.manual then notify("pi-ide suggestion: dropped (cursor moved backward during request)") end
+				state.session = nil
+				return
+			end
+			local current_tick = vim.b[session.bufnr].changedtick or 0
+			if current_tick ~= session.request_changedtick
+				and cur_row == session.anchor_row and cur_col == session.anchor_col then
+				if session.manual then notify("pi-ide suggestion: dropped (buffer changed during request)") end
 				state.session = nil
 				return
 			end
@@ -450,16 +478,29 @@ local function on_cursor_moved()
 	if state.session.bufnr ~= bufnr then dismiss() return end
 	local s = state.session
 	local cur = vim.api.nvim_win_get_cursor(0)
-	if cur[1] - 1 ~= s.anchor_row or cur[2] ~= s.anchor_col then
-		-- TextChangedI may also be firing this tick; defer to let it reconcile first.
-		vim.schedule(function()
-			if not state.session then return end
-			local c = vim.api.nvim_win_get_cursor(0)
-			if c[1] - 1 ~= state.session.anchor_row or c[2] ~= state.session.anchor_col then
-				dismiss()
-			end
-		end)
-	end
+	local event_row, event_col = cur[1] - 1, cur[2]
+	local left_anchor = event_row ~= s.anchor_row or event_col ~= s.anchor_col
+	local left_last_edit = s.request_id and #s.suggestions == 0 and s.pending_edit_row ~= nil
+		and (event_row ~= s.pending_edit_row or event_col ~= s.pending_edit_col)
+	if not left_anchor and not left_last_edit then return end
+
+	-- CursorMovedI normally fires before TextChangedI for typed input. Compare
+	-- the edit generation across the deferred boundary rather than only the
+	-- final cursor position, so out-and-back navigation cannot masquerade as a
+	-- matching edit.
+	local pending_tick_before = s.pending_edit_tick
+	vim.schedule(function()
+		if state.session ~= s then return end
+		if s.request_id and #s.suggestions == 0 then
+			local edit_followed_event = s.pending_edit_tick ~= pending_tick_before
+			local event_matches_recorded_edit = s.pending_edit_row == event_row and s.pending_edit_col == event_col
+			if edit_followed_event or event_matches_recorded_edit then return end
+			dismiss()
+			return
+		end
+		local c = vim.api.nvim_win_get_cursor(0)
+		if c[1] - 1 ~= s.anchor_row or c[2] ~= s.anchor_col then dismiss() end
+	end)
 end
 
 function M.setup(server, config)
