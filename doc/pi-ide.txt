@@ -160,9 +160,11 @@ extension calls an LLM and returns up to three alternatives; Neovim renders
 them as virtual text and handles cycling and partial acceptance.
 
 Suggestions work without a treesitter parser, using cursor-local context
-only. When treesitter is available, pi-ide.nvim adds a compact declaration
-outline that prioritizes symbols near the cursor and omits function-body
-implementation details.
+only. When treesitter is available, pi-ide.nvim builds its declaration outline
+from standard `locals` query captures and supplements them with a compact
+generic top-level traversal. Language-specific knowledge therefore comes from
+the installed treesitter queries rather than per-language plugin logic.
+Parsers without a locals query still provide a bounded structural fallback.
 
 Setup options under `suggestion` are passed through to the suggestion
 module:

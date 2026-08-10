@@ -102,8 +102,12 @@ alternatives as ghost text; and lets the user cycle and accept by word, line,
 or full suggestion.
 
 Suggestions work without a treesitter parser, using cursor-local context only.
-When treesitter is available, the declaration outline prioritizes symbols near
-the cursor and omits function-body implementation details.
+When treesitter is available, the declaration outline uses the parser's
+standard `locals` query captures (functions, methods, types, fields, and other
+definitions), supplemented by a compact generic top-level traversal. Language
+specificity therefore comes from the installed treesitter queries rather than
+per-language logic in pi-ide.nvim; parsers without a locals query still provide
+a bounded structural fallback.
 
 ### Model selection
 
@@ -209,5 +213,6 @@ Run the headless suggestion regression suite from the repository root:
 nvim --headless -u NONE -c 'luafile tests/suggestion_spec.lua'
 ```
 
-It covers semantic context budgeting, exact multiline rendering, active and
-in-flight typing-through, and explicit cursor cancellation.
+It covers query-driven and parser-only semantic outlines across several
+languages, context budgeting, exact multiline rendering, active and in-flight
+typing-through, and explicit cursor cancellation.

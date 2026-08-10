@@ -41,26 +41,135 @@ test_semantic_outline()
 
 local function test_additional_outline_grammars()
 	local context = require("pi-ide.suggestion.context")
-	local cbuf = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_buf_set_name(cbuf, "/tmp/pi-ide-semantic-outline.c")
-	vim.bo[cbuf].filetype = "c"
-	vim.api.nvim_buf_set_lines(cbuf, 0, -1, false, {
+	local function outline_for(filetype, lines, cursor_row)
+		local bufnr = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_buf_set_name(bufnr, "/tmp/pi-ide-semantic-outline-" .. filetype)
+		vim.bo[bufnr].filetype = filetype
+		vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+		if not context.has_treesitter(bufnr) then
+			vim.api.nvim_buf_delete(bufnr, { force = true })
+			return nil
+		end
+		local outline = context.outline(bufnr, cursor_row or 0)
+		vim.api.nvim_buf_delete(bufnr, { force = true })
+		return outline
+	end
+
+	local c_outline = outline_for("c", {
 		"typedef struct Widget {",
 		"  int value;",
 		"} Widget;",
-		"",
 		"int compute(struct Widget *widget) {",
 		"  int implementation_noise = widget->value;",
 		"  return implementation_noise;",
 		"}",
-	})
-	if context.has_treesitter(cbuf) then
-		local outline = context.outline(cbuf, 4)
-		check(outline:find("Widget", 1, true) ~= nil, "C semantic outline omitted a struct/type declaration")
-		check(outline:find("compute", 1, true) ~= nil, "C semantic outline omitted a function declaration")
-		check(outline:find("implementation_noise", 1, true) == nil, "C semantic outline traversed a function body")
+	}, 3)
+	if c_outline then
+		check(c_outline:find("Widget", 1, true) ~= nil, "C outline omitted a type definition")
+		check(c_outline:find("value", 1, true) ~= nil, "C locals query omitted a nested field")
+		check(c_outline:find("compute", 1, true) ~= nil, "C outline omitted a function definition")
+		check(c_outline:find("implementation_noise", 1, true) == nil, "C outline included a function-local variable")
 	end
-	vim.api.nvim_buf_delete(cbuf, { force = true })
+
+	local query_cases = {
+		lua = {
+			lines = { "local function outer()", "  local function inner_query_symbol()", "  end", "end" },
+			needle = "inner_query_symbol",
+		},
+		typescript = {
+			lines = {
+				"export interface Shape { area(): number }",
+				"export class Widget {",
+				"  queryMethod(value: number) {",
+				"    return value",
+				"  }",
+				"}",
+			},
+			needle = "queryMethod",
+			extra_needle = "Shape",
+		},
+		python = {
+			lines = { "class Widget:", "    def query_method(self):", "        return 1" },
+			needle = "query_method",
+		},
+		rust = {
+			lines = { "struct Widget;", "impl Widget {", "    fn query_method(&self) {}", "}" },
+			needle = "query_method",
+		},
+	}
+	for filetype, case in pairs(query_cases) do
+		local outline = outline_for(filetype, case.lines, 1)
+		if outline then
+			check(outline:find(case.needle, 1, true) ~= nil, filetype .. " locals query omitted " .. case.needle)
+			if case.extra_needle then
+				check(outline:find(case.extra_needle, 1, true) ~= nil,
+					filetype .. " generic supplement omitted " .. case.extra_needle)
+			end
+		end
+	end
+
+	-- A parser without a usable locals query still contributes a compact
+	-- top-level outline instead of falling back to the old full AST dump.
+	local fallback_buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(fallback_buf, "/tmp/pi-ide-semantic-outline-fallback.lua")
+	vim.bo[fallback_buf].filetype = "lua"
+	vim.api.nvim_buf_set_lines(fallback_buf, 0, -1, false, {
+		"local function parser_only_fallback()",
+		"  local function query_loaded_later()",
+		"    return true",
+		"  end",
+		"  return query_loaded_later()",
+		"end",
+	})
+	local original_query_get = vim.treesitter.query.get
+	vim.treesitter.query.get = function(lang, query_name)
+		if query_name == "locals" then return nil end
+		return original_query_get(lang, query_name)
+	end
+	context.invalidate(fallback_buf)
+	local ok_fallback, fallback_outline = pcall(context.outline, fallback_buf, 2)
+	local fallback_scope = context.enclosing_scope(fallback_buf, 2, 4)
+	vim.treesitter.query.get = original_query_get
+	check(ok_fallback and fallback_outline:find("parser_only_fallback", 1, true) ~= nil,
+		"parser-only fallback did not produce a top-level outline")
+	check(fallback_scope:find("query_loaded_later", 1, true) ~= nil,
+		"parser-only fallback omitted the nested enclosing scope")
+	local query_outline = context.outline(fallback_buf, 2)
+	check(query_outline:find("query_loaded_later", 1, true) ~= nil,
+		"semantic cache did not detect a locals query loaded at runtime")
+	vim.api.nvim_buf_delete(fallback_buf, { force = true })
+
+	-- Dense definitions at the top of a file must not consume the capture
+	-- budget reserved for declarations and scopes around the cursor.
+	local saturation_buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(saturation_buf, "/tmp/pi-ide-semantic-outline-saturation.lua")
+	vim.bo[saturation_buf].filetype = "lua"
+	local saturation_lines = {}
+	local function append_dense_definitions(prefix, row)
+		local names, values = {}, {}
+		for col = 1, 25 do
+			names[#names + 1] = string.format("%s_%d_%d", prefix, row, col)
+			values[#values + 1] = tostring(col)
+		end
+		saturation_lines[#saturation_lines + 1] = "local " .. table.concat(names, ", ") .. " = " .. table.concat(values, ", ")
+	end
+	for row = 1, 200 do append_dense_definitions("header", row) end
+	for _ = 201, 600 do saturation_lines[#saturation_lines + 1] = "-- filler" end
+	for row = 601, 798 do append_dense_definitions("nearby", row) end
+	saturation_lines[#saturation_lines + 1] = "local function saturated_target_outer()"
+	saturation_lines[#saturation_lines + 1] = "  local function saturated_target_inner()"
+	saturation_lines[#saturation_lines + 1] = "    return true"
+	saturation_lines[#saturation_lines + 1] = "  end"
+	saturation_lines[#saturation_lines + 1] = "  return saturated_target_inner()"
+	saturation_lines[#saturation_lines + 1] = "end"
+	vim.api.nvim_buf_set_lines(saturation_buf, 0, -1, false, saturation_lines)
+	local saturation_outline = context.outline(saturation_buf, 800)
+	local saturation_scope = context.enclosing_scope(saturation_buf, 800, 4)
+	check(saturation_outline:find("saturated_target_inner", 1, true) ~= nil,
+		"header captures starved query definitions near the cursor")
+	check(saturation_scope:find("saturated_target_inner", 1, true) ~= nil,
+		"truncated query context did not supplement the enclosing scope")
+	vim.api.nvim_buf_delete(saturation_buf, { force = true })
 
 	local unicode_buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_name(unicode_buf, "/tmp/pi-ide-semantic-outline-unicode.lua")
