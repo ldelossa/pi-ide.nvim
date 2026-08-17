@@ -2,6 +2,10 @@ local M = {}
 
 local active = {}
 
+function M.setup(opts)
+	M.config = opts or {}
+end
+
 local function find_main_editor_window()
 	for _, win in ipairs(vim.api.nvim_list_wins()) do
 		local buf = vim.api.nvim_win_get_buf(win)
@@ -108,6 +112,17 @@ end
 
 function M.open_blocking(params)
 	local tab_name = params.tab_name
+
+	-- When diff review is disabled, accept the proposed content immediately and
+	-- let the client apply it. No diff tab is opened.
+	if M.config.diff_review_enabled == false then
+		return {
+			content = {
+				{ type = "text", text = "FILE_SAVED" },
+				{ type = "text", text = params.new_file_contents },
+			},
+		}
+	end
 
 	if active[tab_name] then
 		resolve_rejected(tab_name)

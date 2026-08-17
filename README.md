@@ -62,6 +62,7 @@ The default configuration is:
 require("pi-ide").setup({
     auto_start = true,                 -- start the server on plugin load
     claude_code_compatibility = false, -- write claude-code lockfile too
+    diff_review_enabled = true,        -- open a diff tab for write/edit proposals; false = apply directly
     log_level = "warn",                -- trace, debug, info, warn, error
     suggestion = {
         auto_trigger = true,           -- debounced fire on TextChangedI

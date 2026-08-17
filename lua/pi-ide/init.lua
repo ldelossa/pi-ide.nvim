@@ -22,6 +22,7 @@ function M.setup(opts)
 	opts = opts or {}
 	M.config = opts
 	logger.setup(opts)
+	diff.setup(opts)
 	if opts.auto_start ~= false then
 		vim.schedule(M.start)
 	end
