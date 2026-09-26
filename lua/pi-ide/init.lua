@@ -5,7 +5,6 @@ local lockfile = require("pi-ide.lockfile")
 local server = require("pi-ide.server.init")
 local selection = require("pi-ide.selection")
 local diff = require("pi-ide.diff")
-local suggestion = require("pi-ide.suggestion")
 
 M.state = { running = false, port = nil, lockfile_path = nil }
 M.config = {}
@@ -49,13 +48,11 @@ function M.start()
 	M.state.port = port
 	M.state.lockfile_path = lock_path_or_err
 	selection.setup(server)
-	suggestion.setup(server, M.config.suggestion or {})
 end
 
 function M.stop()
 	if not M.state.running then return end
 	selection.disable()
-	suggestion.disable()
 	diff.close_all()
 	if M.state.port then lockfile.remove(M.state.port, lockfile_opts()) end
 	server.stop()

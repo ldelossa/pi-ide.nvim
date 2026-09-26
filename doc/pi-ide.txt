@@ -13,9 +13,8 @@ CONTENTS                                                      *pi-ide-contents*
   4   Claude Code Compatibility ..................... |pi-ide-claude-code|
   5   Tools ......................................... |pi-ide-tools|
   6   Notifications ................................. |pi-ide-notifications|
-  7   Suggestions ................................... |pi-ide-suggestions|
-  8   Architecture .................................. |pi-ide-architecture|
-  9   File Layout ................................... |pi-ide-files|
+  7   Architecture .................................. |pi-ide-architecture|
+  8   File Layout ................................... |pi-ide-files|
 
 ==============================================================================
 INTRODUCTION                                                     *pi-ide-intro*
@@ -23,8 +22,7 @@ INTRODUCTION                                                     *pi-ide-intro*
 `pi-ide.nvim` is a Neovim plugin that serves the `pi-ide` protocol over a
 local WebSocket. External AI agents like `pi` and `claude-code` connect to
 the plugin to open diffs in Neovim, read LSP diagnostics, list open buffers,
-receive cursor and selection notifications, and request inline code
-completions (often called "suggestions") that render as ghost text.
+receive cursor and selection notifications.
 
 This is the reference editor implementation for the `pi-ide` Pi extension at
 <https://github.com/ldelossa/pi-ide>. The `pi-ide` extension expects an
@@ -32,12 +30,8 @@ editor that speaks this protocol, and `pi-ide.nvim` implements this in
 Neovim.
 
 The plugin is opinionated about where the agent runs. It assumes `pi` or
-`claude-code` are running as external processes, outside of Neovim. The
-plugin does not embed an agent, does not call out to an LLM directly, and
-does not hold any prompt state. The inline suggestion feature is the one
-place where an LLM is involved, but the model call is made by the connected
-`pi-ide` extension running inside `pi`; Neovim only gathers context and
-renders ghost text.
+`claude-code` are running as external processes, outside of Neovim. The plugin does not embed an agent, does not call out to an LLM directly,
+and does not hold any prompt state.
 
 ==============================================================================
 SETUP                                                            *pi-ide-setup*
@@ -60,18 +54,13 @@ The default configuration is:
         auto_start = true,                 -- start the server on plugin load
         claude_code_compatibility = false, -- write claude-code lockfile too
         log_level = "warn",                -- trace, debug, info, warn, error
-        suggestion = {
-            auto_trigger = true,           -- debounced fire on TextChangedI
-            default_keys = true,           -- install <M-\>, <M-]>/<M-[>, <Tab>, <C-]>
-            model = nil,                   -- optional. preferred model "provider/id"
-        },
     })
 <
 
 ==============================================================================
 COMMANDS                                                      *pi-ide-commands*
 
-Six user commands are installed.
+Three user commands are installed.
 
                                                                      *:PiStart*
 `:PiStart`              Start the MCP server on a random free port and write
@@ -84,21 +73,6 @@ Six user commands are installed.
                                                                     *:PiStatus*
 `:PiStatus`             Open a floating window showing the server port,
                         connected client count, and lockfile path.
-
-                                                                   *:PiSuggest*
-`:PiSuggest`            Manually trigger an inline suggestion at the cursor.
-                        Requires a connected `pi-ide` extension client;
-                        treesitter context is used when available.
-
-                                                             *:PiSuggestToggle*
-`:PiSuggestToggle`      Toggle automatic (debounced) suggestion triggering on
-                        or off for the current session. The manual command
-                        keeps working when auto is off.
-
-                                                                *:PiSuggestModel*
-`:PiSuggestModel`       Ask the connected `pi-ide` extension for available
-                        models and select the runtime suggestion model for
-                        this Neovim session.
 
 ==============================================================================
 CLAUDE CODE COMPATIBILITY                                  *pi-ide-claude-code*
@@ -152,97 +126,12 @@ payload includes the current file, cursor position, and selected range and
 text if any.
 
 ==============================================================================
-SUGGESTIONS                                                *pi-ide-suggestions*
-
-Inline ghost-text suggestions, similar in style to GitHub Copilot but routed
-through the `pi-ide` Pi extension. The editor initiates the request; the
-extension calls an LLM and returns up to three alternatives; Neovim renders
-them as virtual text and handles cycling and partial acceptance.
-
-Suggestions work without a treesitter parser, using cursor-local context
-only. When treesitter is available, pi-ide.nvim builds its declaration outline
-from standard `locals` query captures and supplements them with a compact
-generic top-level traversal. Language-specific knowledge therefore comes from
-the installed treesitter queries rather than per-language plugin logic.
-Parsers without a locals query still provide a bounded structural fallback.
-
-Setup options under `suggestion` are passed through to the suggestion
-module:
->
-    require("pi-ide").setup({
-        suggestion = {
-            auto_trigger = true,    -- debounced on TextChangedI
-            default_keys = true,    -- install <M-\>, <M-]>/<M-[>, <Tab>, <C-]>
-            model = nil,            -- optional. preferred model "provider/id"
-        },
-    })
-<
-Model precedence: the `pi` CLI flag `--pi-ide-suggestion-model
-<provider>/<id>` wins. Otherwise the editor-provided `model` setup option
-is sent in the request and used. If neither is set, the current session's
-model is used.
-
-To find valid `provider/id` strings, run `pi --list-models` and join the
-`provider` and `model` columns with a `/` (e.g., `openai/gpt-4o`). You can
-also run |:PiSuggestModel| while connected to pi to pick an available model
-for the current Neovim session. If pi was started with
-`--pi-ide-suggestion-model`, that CLI override still wins.
-
-For suggestions, prefer low-latency models. Large reasoning models often
-feel too slow for inline completion; smaller coding-capable models such as
-`openai-codex/gpt-5.4-mini` or `deepseek/deepseek-v4-flash` usually provide
-a better interactive experience.
-
-Default insert-mode keys (set `default_keys = false` to skip):
-
-    <M-\>         manually trigger a suggestion (|<Plug>(PiSuggest)|)
-    <M-]>         cycle to next alternative (|<Plug>(PiSuggestNext)|)
-    <M-[>         cycle to previous alternative (|<Plug>(PiSuggestPrev)|)
-    <Tab>         accept the full suggestion (|<Plug>(PiSuggestAccept)|)
-    <C-]>         dismiss the active suggestion (|<Plug>(PiSuggestDismiss)|)
-
-These mirror copilot.vim's canonical defaults so users migrating from
-copilot.vim can drop in pi-ide.nvim without remapping. Accept-line and
-accept-word are exposed as |<Plug>(PiSuggestAcceptLine)| and
-|<Plug>(PiSuggestAcceptWord)| but unbound by default; bind them yourself
-to keys that fit your terminal and existing setup.
-
-Terminal caveats:
-
-  - `<Tab>` is the default for accept and often conflicts with snippet
-    plugins, completion menus, or any super-tab logic the user already
-    has. If you use snippets or a tab-driven completion popup, set
-    `default_keys = false` and bind |<Plug>(PiSuggestAccept)| to a
-    different key.
-
-Display gating: suggestions are suppressed on lines where the inline
-virt_text would render in the wrong screen position — specifically when
-`conceallevel > 0` on the current window, or when the current line is
-wide enough to wrap inside the window. Auto-triggers skip silently;
-manual `:PiSuggest` emits a warning so you know why nothing appeared.
-
-Session lifecycle: matching characters typed while a request is in flight
-are reconciled when its response arrives. Once a suggestion is visible,
-matching typing advances the ghost text without firing a new LLM call.
-Explicit cursor navigation cancels the request or visible suggestion. Typing
-a character that diverges first tries an alternative whose prefix matches;
-if none matches, the session is dismissed. Partial acceptance preserves the
-remaining tail as a new ghost-text session, so a single LLM call can drive
-multiple word- or line-sized accepts.
-
-Completion scope is hybrid: mid-token and mid-statement suggestions stay
-concise, while structural boundaries and descriptive implementation comments
-may produce a small coherent multi-line insertion.
-
-==============================================================================
 ARCHITECTURE                                              *pi-ide-architecture*
 
 `pi-ide.nvim` runs a single MCP server per Neovim instance, listening on a
 random free port on `127.0.0.1`. The server speaks JSON-RPC 2.0 in WebSocket
 text frames using MCP protocol version `2024-11-05`. Tool calls flow from
-the connected agent into Neovim; the plugin also initiates its own requests
-(`getSuggestions` and `listSuggestionModels`) back to the agent for the
-inline suggestion feature.
+the connected agent into Neovim.
 
 On startup the plugin writes a lockfile to `~/.pi/ide/<port>.lock`. Clients
 discover the server by reading lockfiles in this directory and matching the
@@ -261,11 +150,6 @@ FILE LAYOUT                                                      *pi-ide-files*
         selection.lua     -- cursor and selection tracking
         diff.lua          -- diff tab lifecycle and coroutine accept/reject
         tools.lua         -- MCP tool definitions and dispatch
-        suggestion/
-            init.lua      -- suggestion session state machine and autocmds
-            context.lua   -- treesitter outline, enclosing scope, cursor window
-            render.lua    -- virtual text rendering via extmarks
-            keys.lua      -- <Plug> mappings and default insert-mode keymaps
         server/
             init.lua      -- JSON-RPC dispatch and deferred response routing
             tcp.lua       -- libuv accept loop, client registry, ping timer
