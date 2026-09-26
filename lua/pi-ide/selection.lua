@@ -97,9 +97,10 @@ function M.setup(server)
 	)
 end
 
---- Return the last known selection state, or nil if none.
+--- Return the last known selection state. Before the first editor autocmd,
+--- capture it directly so a newly initialized client always receives context.
 function M.get_current()
-	return state.latest
+	return state.latest or current_selection()
 end
 
 function M.disable()

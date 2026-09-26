@@ -20,7 +20,13 @@ M.state = {
 
 local function register_handlers()
 	M.state.handlers = {
-		["initialize"] = function()
+		["initialize"] = function(client)
+			-- The client installs its message handler before sending initialize, so
+			-- synchronize editor state here rather than from the raw socket
+			-- on_connect callback. Send it before the initialize response so the
+			-- client has applied the state when its connect call resolves.
+			local current = require("pi-ide.selection").get_current()
+			if current then M.send_notification(client, "selection_changed", current) end
 			return {
 				protocolVersion = MCP_PROTOCOL_VERSION,
 				capabilities = { logging = vim.empty_dict(), tools = { listChanged = true } },
@@ -53,14 +59,6 @@ function M.start(opts)
 		on_message = function(client, message) M._handle_message(client, message) end,
 		on_connect = function(client)
 			logger.debug("server", "client connected:", client.id)
-			-- Push current selection state to the newly connected client so the
-			-- pi extension can restore editor context immediately without waiting
-			-- for the user to move the cursor.
-			local selection = require("pi-ide.selection")
-			local current = selection.get_current()
-			if current then
-				M.send_notification(client, "selection_changed", current)
-			end
 		end,
 		on_disconnect = function(client, code, reason)
 			logger.debug("server", "client disconnected:", client.id, "(code:", code, ", reason:", reason or "N/A", ")")
